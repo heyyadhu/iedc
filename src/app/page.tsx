@@ -7,6 +7,7 @@ export default function App() {
   const [view, setView] = useState<'search' | 'download'>('search');
   const [name, setName] = useState('');
   const [certificateUrl, setCertificateUrl] = useState<string | null>(null);
+  const [certificateName, setCertificateName] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   // Asset configurations derived from the provided design states
@@ -30,30 +31,59 @@ export default function App() {
     certificatePreview: 'https://codia-f2c.s3.us-west-1.amazonaws.com/image/2026-03-30/ifn5S7vxJ0.png'
   };
 
+  const UPI_ID = process.env.NEXT_PUBLIC_UPI_ID || '';
+
   const handleSearch = async () => {
     if (name.trim()) {
       setIsLoading(true);
       try {
-        // Query the 'certificates' table for a name matching the input
-        const { data, error } = await supabase
-          .from('certificates')
-          .select('file_path')
-          .ilike('name', name.trim())
-          .single();
+        const query = name.trim();
+        console.log('Starting search for name:', query);
 
-        if (data && !error) {
-          // Construct the public URL from Supabase Storage
-          const { data: publicData } = supabase.storage
-            .from('certificates')
-            .getPublicUrl(data.file_path);
+        // List files in the 'images' bucket. 
+        // We use a broader list to ensure we find the file even with extension variations.
+        const { data: fileList, error: listError } = await supabase.storage
+          .from('images')
+          .list('', {
+            limit: 100, // Adjust if you have more than 100 certificates
+            search: query
+          });
+
+        if (listError) {
+          console.error('Supabase Storage Error:', listError);
+          alert(`Error: ${listError.message}`);
+          return;
+        }
+
+        console.log('Files found in bucket matching query:', fileList?.map(f => f.name));
+
+        if (fileList && fileList.length > 0) {
+          // Find a file that matches the typed name exactly (ignoring extensions)
+          const targetFile = fileList.find(f => {
+            const nameWithoutExtension = f.name.split('.').slice(0, -1).join('.') || f.name;
+            return nameWithoutExtension.toLowerCase() === query.toLowerCase();
+          }) || fileList[0]; // Fallback to first partial match
           
+          console.log('Selected file:', targetFile.name);
+          
+          const { data: publicData } = supabase.storage
+            .from('images')
+            .getPublicUrl(targetFile.name);
+          
+          if (!publicData.publicUrl) {
+            throw new Error('Failed to generate public URL');
+          }
+
+          console.log('Generated URL:', publicData.publicUrl);
+          setCertificateName(targetFile.name);
           setCertificateUrl(publicData.publicUrl);
           setView('download');
         } else {
-          alert('No certificate found for this name.');
+          console.warn('No files returned from search.');
+          alert('No certificate found for that name. Please check your spelling or try again.');
         }
       } catch (err) {
-        console.error('Error fetching certificate:', err);
+        console.error('Unexpected Error:', err);
         alert('An error occurred during the search.');
       } finally {
         setIsLoading(false);
@@ -62,25 +92,33 @@ export default function App() {
   };
 
   const handleDownload = async () => {
-    if (certificateUrl) {
+    if (certificateName) {
       try {
-        const response = await fetch(certificateUrl);
-        const blob = await response.blob();
+        // Use Supabase's download method to get a blob directly, bypassing standard fetch CORS issues
+        const { data, error } = await supabase.storage
+          .from('images')
+          .download(certificateName);
+
+        if (error) throw error;
+
+        const url = window.URL.createObjectURL(data);
         const link = document.createElement('a');
-        link.href = window.URL.createObjectURL(blob);
-        link.download = `${name.replace(/\s+/g, '_')}_Certificate.png`;
+        link.href = url;
+        link.download = certificateName; // Use the actual filename from storage
         document.body.appendChild(link);
         link.click();
-        document.body.removeChild(link);
+        link.remove();
+        window.URL.revokeObjectURL(url);
       } catch (err) {
         console.error('Download failed:', err);
-        alert('Failed to download image.');
+        alert('Failed to download image. Please try again.');
       }
     }
     // Return to original state after "download" action
     setView('search');
     setName('');
     setCertificateUrl(null);
+    setCertificateName(null);
   };
 
   return (
@@ -172,6 +210,13 @@ export default function App() {
               >
                 download
               </button>
+
+              {/* UPI ID Display (Read from env) */}
+              {UPI_ID && (
+                <div className="absolute top-[320px] left-[139px] text-black font-light text-[10px] opacity-70">
+                  UPI: {UPI_ID}
+                </div>
+              )}
             </div>
           )}
 
